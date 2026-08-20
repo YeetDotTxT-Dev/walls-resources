@@ -1,0 +1,1443 @@
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+local TextService = game:GetService("TextService")
+local StarterGui = game:GetService("StarterGui")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+local Mouse = LocalPlayer:GetMouse()
+
+-- Exploit helpers (never error if unavailable)
+local setHidden = sethiddenproperty or set_hidden_property or set_hidden_prop
+local setSimRadius = setsimulationradius or set_simulation_radius
+local simConnection = nil
+
+local C = {
+    panel   = Color3.fromRGB(15, 15, 18),
+    panel2  = Color3.fromRGB(20, 20, 25),
+    row     = Color3.fromRGB(24, 24, 30),
+    field   = Color3.fromRGB(12, 12, 15),
+    border  = Color3.fromRGB(45, 45, 55),
+    border2 = Color3.fromRGB(60, 60, 75),
+    accent  = Color3.fromRGB(0, 200, 255),
+    accent2 = Color3.fromRGB(0, 170, 255),
+    text    = Color3.fromRGB(200, 205, 215),
+    dim     = Color3.fromRGB(150, 150, 160),
+    green   = Color3.fromRGB(0, 255, 170),
+    red     = Color3.fromRGB(255, 80, 80),
+    yellow  = Color3.fromRGB(255, 200, 0),
+}
+
+local NoclipModes = { "UPON HOLD", "DISABLED", "UPON THROW", "ALWAYS" }
+
+local Config = {
+    ThrowVelocity   = 150,
+    LaunchVelocity  = 1000,
+    SnipeVelocity   = 200,
+    OrbitRadius     = 10,
+    MagnetRadius    = 70,
+    FollowStiffness = 15000,
+    FollowDamping   = 600,
+    RespawnTool     = true,
+    SimRadiusEnabled = true,
+    NoclipModeIndex = 1,
+}
+
+local Keybinds = {
+    Grab           = Enum.UserInputType.MouseButton1,
+    PullCloser     = Enum.KeyCode.Q,
+    PushFurther    = Enum.KeyCode.E,
+    Freeze         = Enum.KeyCode.F,
+    Orbit          = Enum.KeyCode.H,
+    Spin           = Enum.KeyCode.G,
+    LockRotation   = Enum.KeyCode.L,
+    Recall         = Enum.KeyCode.X,
+    Throw          = Enum.KeyCode.Y,
+    Launch         = Enum.KeyCode.J,
+    Snipe          = Enum.KeyCode.V,
+    SnipeMouse     = Enum.UserInputType.MouseButton3,
+    ResetRotation  = Enum.KeyCode.R,
+    MagnetPull     = Enum.KeyCode.P,
+    ToggleSimRadius = Enum.KeyCode.K,
+}
+
+local DefaultKeybinds = {}
+for k, v in pairs(Keybinds) do DefaultKeybinds[k] = v end
+
+-- Runtime state
+local object = nil
+local mousedown = false
+local dist = 25
+local orbitActive = false
+local orbitAngle = 0
+local frozenRoot = nil
+local lockGyro, lockActive = nil, false
+local spinAV, spinActive = nil, false
+local recalling = false
+local currentToolInstance = nil
+local isBindingKey = nil
+local holdConn = nil
+local laserActive = false
+
+---------------------------------------------------------
+-- PHYSICS MOVERS (created once, reused)
+---------------------------------------------------------
+local BP = Instance.new("BodyPosition")
+BP.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+BP.P = Config.FollowStiffness
+BP.D = Config.FollowDamping
+
+---------------------------------------------------------
+-- HIGHLIGHTS + SHARED LASER
+---------------------------------------------------------
+local ObjectHighlight = Instance.new("Highlight")
+ObjectHighlight.FillColor = C.accent2
+ObjectHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+ObjectHighlight.FillTransparency = 0.5
+ObjectHighlight.Enabled = false
+ObjectHighlight.Parent = workspace
+
+local TargetHighlight = Instance.new("Highlight")
+TargetHighlight.FillColor = Color3.fromRGB(255, 40, 40)
+TargetHighlight.OutlineColor = Color3.fromRGB(255, 255, 0)
+TargetHighlight.FillTransparency = 0.35
+TargetHighlight.Enabled = false
+TargetHighlight.Parent = workspace
+
+local LaserPart = Instance.new("Part")
+LaserPart.Name = "Laser"
+LaserPart.Anchored = true
+LaserPart.CanCollide = false
+LaserPart.Locked = true
+LaserPart.Transparency = 0.4
+LaserPart.Reflectance = 0.5
+LaserPart.Material = Enum.Material.Neon
+LaserPart.Color = C.accent2
+LaserPart.Size = Vector3.new(1, 1, 1)
+local LaserMesh = Instance.new("BlockMesh")
+LaserMesh.Parent = LaserPart
+
+---------------------------------------------------------
+-- SIMULATION RADIUS TOGGLE
+---------------------------------------------------------
+local function toggleNet(enable)
+    Config.SimRadiusEnabled = enable
+    if enable then
+        if not simConnection then
+            simConnection = RunService.RenderStepped:Connect(function()
+                pcall(function()
+                    settings().Physics.AllowSleep = false
+                    if setHidden then
+                        setHidden(LocalPlayer, "SimulationRadius", math.huge)
+                        setHidden(LocalPlayer, "MaxSimulationRadius", math.huge)
+                    end
+                    LocalPlayer.MaximumSimulationRadius = math.huge
+                    LocalPlayer.ReplicationFocus = workspace
+                end)
+            end)
+        end
+    else
+        if simConnection then
+            simConnection:Disconnect()
+            simConnection = nil
+            pcall(function()
+                if setSimRadius then
+                    setSimRadius(139, 139)
+                elseif setHidden then
+                    setHidden(LocalPlayer, "MaximumSimulationRadius", 139)
+                    setHidden(LocalPlayer, "SimulationRadius", 139)
+                end
+            end)
+        end
+    end
+    if updateSimRadiusBtnUI then updateSimRadiusBtnUI() end
+end
+
+---------------------------------------------------------
+-- SMALL HELPERS
+---------------------------------------------------------
+local function make(class, props, parent)
+    local i = Instance.new(class)
+    for k, v in pairs(props) do i[k] = v end
+    if parent then i.Parent = parent end
+    return i
+end
+
+local function notify(title, text, dur)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = title, Text = text, Duration = dur or 2,
+        })
+    end)
+end
+
+local function getKeyName(keyVal)
+    if not keyVal then return "NONE" end
+    if typeof(keyVal) == "EnumItem" then
+        if keyVal.EnumType == Enum.KeyCode then
+            return keyVal.Name
+        elseif keyVal.EnumType == Enum.UserInputType then
+            if keyVal == Enum.UserInputType.MouseButton1 then return "M1" end
+            if keyVal == Enum.UserInputType.MouseButton2 then return "M2" end
+            if keyVal == Enum.UserInputType.MouseButton3 then return "M3" end
+            return keyVal.Name
+        end
+    end
+    return tostring(keyVal)
+end
+
+---------------------------------------------------------
+-- GUI SHELL
+---------------------------------------------------------
+local ScreenGui = make("ScreenGui", { Name = "TelekinesisCheatUI", ResetOnSpawn = false })
+pcall(function() ScreenGui.Parent = CoreGui end)
+if not ScreenGui.Parent then ScreenGui.Parent = LocalPlayer:WaitForChild("PlayerGui") end
+
+local MainWindow = make("Frame", {
+    Size = UDim2.new(0, 340, 0, 400),
+    Position = UDim2.new(0.02, 0, 0.3, 0),
+    BackgroundColor3 = C.panel,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 2,
+    Active = true,
+    Draggable = true,
+}, ScreenGui)
+
+local Header = make("Frame", {
+    Size = UDim2.new(1, 0, 0, 28),
+    BackgroundColor3 = Color3.fromRGB(24, 24, 30),
+    BorderColor3 = C.border,
+    BorderSizePixel = 1,
+}, MainWindow)
+
+make("TextLabel", {
+    Size = UDim2.new(1, -35, 1, 0),
+    Position = UDim2.new(0, 10, 0, 0),
+    BackgroundTransparency = 1,
+    Text = "TELEKINESIS v3",
+    TextColor3 = C.accent,
+    Font = Enum.Font.Code,
+    TextSize = 13,
+    TextXAlignment = Enum.TextXAlignment.Left,
+}, Header)
+
+local CloseBtn = make("TextButton", {
+    Size = UDim2.new(0, 24, 0, 20),
+    Position = UDim2.new(1, -26, 0, 4),
+    BackgroundColor3 = Color3.fromRGB(180, 40, 40),
+    BorderColor3 = Color3.fromRGB(220, 60, 60),
+    BorderSizePixel = 1,
+    Text = "X",
+    TextColor3 = Color3.fromRGB(255, 255, 255),
+    Font = Enum.Font.Code,
+    TextSize = 13,
+}, Header)
+
+-- Primary tabs
+local TabContainer = make("Frame", {
+    Size = UDim2.new(1, -16, 0, 24),
+    Position = UDim2.new(0, 8, 0, 36),
+    BackgroundTransparency = 1,
+}, MainWindow)
+
+local MainTabBtn = make("TextButton", {
+    Size = UDim2.new(0.5, -2, 1, 0),
+    BackgroundColor3 = C.row,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 1,
+    Text = "[ MAIN ]",
+    TextColor3 = Color3.fromRGB(255, 255, 255),
+    Font = Enum.Font.Code,
+    TextSize = 12,
+}, TabContainer)
+
+local SettingsTabBtn = make("TextButton", {
+    Size = UDim2.new(0.5, -2, 1, 0),
+    Position = UDim2.new(0.5, 2, 0, 0),
+    BackgroundColor3 = C.panel2,
+    BorderColor3 = C.border,
+    BorderSizePixel = 1,
+    Text = "[ SETTINGS ]",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Code,
+    TextSize = 12,
+}, TabContainer)
+
+-- Content frames
+local MainContent = make("ScrollingFrame", {
+    Size = UDim2.new(1, -16, 1, -86),
+    Position = UDim2.new(0, 8, 0, 64),
+    BackgroundColor3 = C.panel2,
+    BorderColor3 = C.border,
+    BorderSizePixel = 1,
+    ScrollBarThickness = 4,
+    CanvasSize = UDim2.new(0, 0, 0, 420),
+}, MainWindow)
+
+local SettingsWindow = make("Frame", {
+    Size = UDim2.new(1, -16, 1, -86),
+    Position = UDim2.new(0, 8, 0, 64),
+    BackgroundColor3 = C.panel2,
+    BorderColor3 = C.border,
+    BorderSizePixel = 1,
+    Visible = false,
+}, MainWindow)
+
+-- Status HUD bar
+local StatusLabel = make("TextLabel", {
+    Size = UDim2.new(1, -16, 0, 16),
+    Position = UDim2.new(0, 8, 1, -20),
+    BackgroundColor3 = C.panel2,
+    BorderColor3 = C.border,
+    BorderSizePixel = 1,
+    Text = "",
+    TextColor3 = C.accent,
+    Font = Enum.Font.Code,
+    TextSize = 9,
+    TextXAlignment = Enum.TextXAlignment.Center,
+}, MainWindow)
+
+local function updateStatus()
+    if not StatusLabel then return end
+    local mode = NoclipModes[Config.NoclipModeIndex]
+    StatusLabel.Text = string.format(
+        "OBJ:%s  NOCLIP:%s  ORBIT:%s  FREEZE:%s  SIM:%s",
+        object and "YES" or "NO",
+        mode,
+        orbitActive and "ON" or "OFF",
+        frozenRoot and "ON" or "OFF",
+        Config.SimRadiusEnabled and "ON" or "OFF"
+    )
+end
+
+-- Settings sub-tabs
+local SubTabContainer = make("Frame", {
+    Size = UDim2.new(1, -8, 0, 22),
+    Position = UDim2.new(0, 4, 0, 4),
+    BackgroundTransparency = 1,
+}, SettingsWindow)
+
+local SubConfigBtn = make("TextButton", {
+    Size = UDim2.new(0.5, -2, 1, 0),
+    BackgroundColor3 = C.row,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 1,
+    Text = "CONFIG",
+    TextColor3 = Color3.fromRGB(255, 255, 255),
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SubTabContainer)
+
+local SubKeybindBtn = make("TextButton", {
+    Size = UDim2.new(0.5, -2, 1, 0),
+    Position = UDim2.new(0.5, 2, 0, 0),
+    BackgroundColor3 = C.panel2,
+    BorderColor3 = C.border,
+    BorderSizePixel = 1,
+    Text = "KEYBINDS",
+    TextColor3 = C.dim,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SubTabContainer)
+
+local SettingsConfigContent = make("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -30),
+    Position = UDim2.new(0, 0, 0, 30),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    CanvasSize = UDim2.new(0, 0, 0, 420),
+}, SettingsWindow)
+
+local SettingsKeybindContent = make("ScrollingFrame", {
+    Size = UDim2.new(1, 0, 1, -30),
+    Position = UDim2.new(0, 0, 0, 30),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 4,
+    CanvasSize = UDim2.new(0, 0, 0, 460),
+    Visible = false,
+}, SettingsWindow)
+
+---------------------------------------------------------
+-- DYNAMIC TOOLTIP SYSTEM (edge-clamped)
+---------------------------------------------------------
+local TooltipFrame = make("Frame", {
+    Size = UDim2.new(0, 230, 0, 50),
+    BackgroundColor3 = Color3.fromRGB(10, 10, 14),
+    BorderColor3 = C.accent,
+    BorderSizePixel = 1,
+    ZIndex = 30,
+    Visible = false,
+}, ScreenGui)
+
+local TooltipScroll = make("ScrollingFrame", {
+    Size = UDim2.new(1, -8, 1, -8),
+    Position = UDim2.new(0, 4, 0, 4),
+    BackgroundTransparency = 1,
+    BorderSizePixel = 0,
+    ScrollBarThickness = 3,
+    ZIndex = 31,
+}, TooltipFrame)
+
+local TooltipLabel = make("TextLabel", {
+    Size = UDim2.new(1, -4, 1, 0),
+    BackgroundTransparency = 1,
+    TextColor3 = Color3.fromRGB(220, 225, 235),
+    Font = Enum.Font.Code,
+    TextSize = 11,
+    TextWrapped = true,
+    TextXAlignment = Enum.TextXAlignment.Left,
+    TextYAlignment = Enum.TextYAlignment.Top,
+    ZIndex = 32,
+}, TooltipScroll)
+
+local function bindTooltip(guiElement, text)
+    guiElement.MouseEnter:Connect(function()
+        TooltipLabel.Text = text
+        local ts = TextService:GetTextSize(text, 11, Enum.Font.Code, Vector2.new(215, 1000))
+        TooltipFrame.Size = UDim2.new(0, 230, 0, math.clamp(ts.Y + 16, 40, 120))
+        TooltipScroll.CanvasSize = UDim2.new(0, 0, 0, ts.Y + 6)
+        TooltipFrame.Visible = true
+    end)
+    guiElement.MouseLeave:Connect(function()
+        TooltipFrame.Visible = false
+    end)
+end
+
+RunService.RenderStepped:Connect(function()
+    if TooltipFrame.Visible then
+        local mp = UserInputService:GetMouseLocation()
+        local vs = Camera.ViewportSize
+        TooltipFrame.Position = UDim2.new(0,
+            math.clamp(mp.X + 16, 0, vs.X - 240),
+            0, math.clamp(mp.Y + 16, 0, vs.Y - TooltipFrame.AbsoluteSize.Y - 8))
+    end
+end)
+
+---------------------------------------------------------
+-- TAB NAVIGATION
+---------------------------------------------------------
+local function setMainTab()
+    MainContent.Visible = true
+    SettingsWindow.Visible = false
+    MainTabBtn.BackgroundColor3 = C.row
+    MainTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    SettingsTabBtn.BackgroundColor3 = C.panel2
+    SettingsTabBtn.TextColor3 = C.dim
+end
+
+local function setSettingsTab()
+    MainContent.Visible = false
+    SettingsWindow.Visible = true
+    SettingsTabBtn.BackgroundColor3 = C.row
+    SettingsTabBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    MainTabBtn.BackgroundColor3 = C.panel2
+    MainTabBtn.TextColor3 = C.dim
+end
+
+local function setConfigSubTab()
+    SettingsConfigContent.Visible = true
+    SettingsKeybindContent.Visible = false
+    SubConfigBtn.BackgroundColor3 = C.row
+    SubConfigBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    SubKeybindBtn.BackgroundColor3 = C.panel2
+    SubKeybindBtn.TextColor3 = C.dim
+end
+
+local function setKeybindSubTab()
+    SettingsConfigContent.Visible = false
+    SettingsKeybindContent.Visible = true
+    SubKeybindBtn.BackgroundColor3 = C.row
+    SubKeybindBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    SubConfigBtn.BackgroundColor3 = C.panel2
+    SubConfigBtn.TextColor3 = C.dim
+end
+
+MainTabBtn.MouseButton1Click:Connect(setMainTab)
+SettingsTabBtn.MouseButton1Click:Connect(setSettingsTab)
+SubConfigBtn.MouseButton1Click:Connect(setConfigSubTab)
+SubKeybindBtn.MouseButton1Click:Connect(setKeybindSubTab)
+CloseBtn.MouseButton1Click:Connect(function()
+    MainWindow.Visible = not MainWindow.Visible
+end)
+
+---------------------------------------------------------
+-- MAIN TAB: KEYBIND REFERENCE ROWS
+---------------------------------------------------------
+local keybindDefinitions = {
+    { id = "Grab",           desc = "Grab / Drag Object", tooltip = "Holds and drags unanchored physics objects along your crosshair ray. Remappable to any key or mouse button." },
+    { id = "PullCloser",     desc = "Pull Closer",        tooltip = "Pulls the grabbed object closer to your character." },
+    { id = "PushFurther",    desc = "Push Further",       tooltip = "Pushes the grabbed object further away." },
+    { id = "Freeze",         desc = "Freeze / Anchor",    tooltip = "Toggles anchoring the whole assembly to freeze it mid-air." },
+    { id = "Orbit",          desc = "Orbit Toggle",       tooltip = "Puts the held object into continuous orbit around your body. Object keeps orbiting after you release the button." },
+    { id = "Spin",           desc = "Spin Toggle",        tooltip = "Spins the held object continuously with a BodyAngularVelocity." },
+    { id = "LockRotation",   desc = "Lock Rotation",      tooltip = "Freezes the object's orientation with a BodyGyro while dragging." },
+    { id = "Recall",         desc = "Recall Object",      tooltip = "Yoinks the held object straight back into your hand." },
+    { id = "Throw",          desc = "Throw Object",       tooltip = "Launches the object forward at configured throw velocity." },
+    { id = "Launch",         desc = "Super Launch",       tooltip = "High-powered launch forward at extreme velocity." },
+    { id = "Snipe",          desc = "Snipe Player",       tooltip = "Fires a homing thrust at the hovered enemy player." },
+    { id = "SnipeMouse",     desc = "Snipe (Mouse 3)",    tooltip = "Alternate snipe trigger on the middle mouse button." },
+    { id = "ResetRotation",  desc = "Reset Rotation",     tooltip = "Straightens the object's orientation with a timed BodyGyro." },
+    { id = "MagnetPull",     desc = "Magnet Pull",        tooltip = "Pulls every unanchored object within Magnet Radius straight to you." },
+    { id = "ToggleSimRadius",desc = "Toggle SimRadius",   tooltip = "Toggles client physics simulation radius for full physics ownership." },
+}
+
+local mainLabels = {}
+for i, data in ipairs(keybindDefinitions) do
+    local row = make("Frame", {
+        Size = UDim2.new(1, -12, 0, 24),
+        Position = UDim2.new(0, 6, 0, (i - 1) * 26 + 6),
+        BackgroundColor3 = C.row,
+        BorderColor3 = C.border,
+        BorderSizePixel = 1,
+    }, MainContent)
+
+    local label = make("TextLabel", {
+        Size = UDim2.new(1, -10, 1, 0),
+        Position = UDim2.new(0, 6, 0, 0),
+        BackgroundTransparency = 1,
+        TextColor3 = C.text,
+        Font = Enum.Font.Code,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
+
+    local function refreshText()
+        label.Text = string.format("> [%-5s] : %s", getKeyName(Keybinds[data.id]), data.desc)
+    end
+    refreshText()
+    mainLabels[data.id] = refreshText
+    bindTooltip(row, data.tooltip)
+end
+MainContent.CanvasSize = UDim2.new(0, 0, 0, #keybindDefinitions * 26 + 12)
+
+---------------------------------------------------------
+-- SETTINGS: CONFIG SUB-TAB
+---------------------------------------------------------
+local cfgY = 6
+local function nextCfgY(h)
+    local y = cfgY
+    cfgY = cfgY + h + 6
+    return y
+end
+
+local function createSettingInput(name, defaultVal, tooltipText, callback)
+    local frame = make("Frame", {
+        Size = UDim2.new(1, -12, 0, 24),
+        Position = UDim2.new(0, 6, 0, nextCfgY(24)),
+        BackgroundColor3 = C.row,
+        BorderColor3 = C.border,
+        BorderSizePixel = 1,
+    }, SettingsConfigContent)
+
+    make("TextLabel", {
+        Size = UDim2.new(0.65, -10, 1, 0),
+        Position = UDim2.new(0, 6, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "> " .. name,
+        TextColor3 = C.text,
+        Font = Enum.Font.Code,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, frame)
+
+    local Box = make("TextBox", {
+        Size = UDim2.new(0.32, -4, 1, -4),
+        Position = UDim2.new(0.68, 0, 0, 2),
+        BackgroundColor3 = C.field,
+        BorderColor3 = C.border,
+        BorderSizePixel = 1,
+        Text = tostring(defaultVal),
+        TextColor3 = C.accent,
+        Font = Enum.Font.Code,
+        TextSize = 11,
+        ClearTextOnFocus = false,
+    }, frame)
+
+    Box.FocusLost:Connect(function()
+        local num = tonumber(Box.Text)
+        if num then
+            callback(num)
+        else
+            Box.Text = tostring(defaultVal)
+        end
+    end)
+
+    bindTooltip(frame, tooltipText)
+end
+
+local setupTool -- forward declaration (defined in part 2)
+
+createSettingInput("THROW FORCE", Config.ThrowVelocity,
+    "Speed applied when throwing an object forward.", function(v) Config.ThrowVelocity = v end)
+createSettingInput("LAUNCH FORCE", Config.LaunchVelocity,
+    "Speed applied when triggering a super launch.", function(v) Config.LaunchVelocity = v end)
+createSettingInput("SNIPE FORCE", Config.SnipeVelocity,
+    "Continuous thrust speed applied to homing snipes.", function(v) Config.SnipeVelocity = v end)
+createSettingInput("ORBIT RADIUS", Config.OrbitRadius,
+    "Studs distance the object stays from you in orbit mode.", function(v) Config.OrbitRadius = v end)
+createSettingInput("MAGNET RADIUS", Config.MagnetRadius,
+    "Studs radius for the Magnet Pull AoE attract.", function(v) Config.MagnetRadius = v end)
+createSettingInput("FOLLOW POWER (P)", Config.FollowStiffness,
+    "Stiffness of the BodyPosition holding spring.", function(v)
+        Config.FollowStiffness = v
+        BP.P = v
+    end)
+createSettingInput("DAMPING (D)", Config.FollowDamping,
+    "Friction/damping to prevent rubberbanding while dragging.", function(v)
+        Config.FollowDamping = v
+        BP.D = v
+    end)
+
+-- Noclip cycle button
+local NoclipBtn = make("TextButton", {
+    Size = UDim2.new(1, -12, 0, 26),
+    Position = UDim2.new(0, 6, 0, nextCfgY(26)),
+    BackgroundColor3 = C.row,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 1,
+    Text = "[ OBJECT NOCLIP: " .. NoclipModes[Config.NoclipModeIndex] .. " ]",
+    TextColor3 = C.green,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SettingsConfigContent)
+bindTooltip(NoclipBtn, "Cycles object noclip mode: UPON HOLD (phases while dragging), DISABLED (solid), UPON THROW (phases when launched), or ALWAYS.")
+
+local function updateNoclipBtnUI()
+    local mode = NoclipModes[Config.NoclipModeIndex]
+    NoclipBtn.Text = "[ OBJECT NOCLIP: " .. mode .. " ]"
+    NoclipBtn.TextColor3 = mode == "DISABLED" and C.red or (mode == "ALWAYS" and C.yellow or C.green)
+end
+
+NoclipBtn.MouseButton1Click:Connect(function()
+    Config.NoclipModeIndex = (Config.NoclipModeIndex % #NoclipModes) + 1
+    updateNoclipBtnUI()
+    updateStatus()
+end)
+
+-- SimRadius toggle
+local SimRadiusBtn = make("TextButton", {
+    Size = UDim2.new(1, -12, 0, 26),
+    Position = UDim2.new(0, 6, 0, nextCfgY(26)),
+    BackgroundColor3 = C.row,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 1,
+    Text = "",
+    TextColor3 = C.green,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SettingsConfigContent)
+bindTooltip(SimRadiusBtn, "Toggles whether client simulation radius is forced to math.huge for physics ownership.")
+
+local function updateSimRadiusBtnUI()
+    SimRadiusBtn.Text = Config.SimRadiusEnabled and "[ SIMRADIUS: ON ]" or "[ SIMRADIUS: OFF ]"
+    SimRadiusBtn.TextColor3 = Config.SimRadiusEnabled and C.green or C.red
+end
+updateSimRadiusBtnUI()
+
+SimRadiusBtn.MouseButton1Click:Connect(function()
+    toggleNet(not Config.SimRadiusEnabled)
+end)
+
+-- Respawn tool toggle
+local RespawnBtn = make("TextButton", {
+    Size = UDim2.new(1, -12, 0, 26),
+    Position = UDim2.new(0, 6, 0, nextCfgY(26)),
+    BackgroundColor3 = C.row,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 1,
+    Text = "",
+    TextColor3 = C.green,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SettingsConfigContent)
+bindTooltip(RespawnBtn, "Toggles whether the Telekinesis tool automatically re-appears in your backpack upon dying.")
+
+local function updateRespawnBtnUI()
+    RespawnBtn.Text = Config.RespawnTool and "[ RESPAWN WITH TOOL: ON ]" or "[ RESPAWN WITH TOOL: OFF ]"
+    RespawnBtn.TextColor3 = Config.RespawnTool and C.green or C.red
+end
+updateRespawnBtnUI()
+
+RespawnBtn.MouseButton1Click:Connect(function()
+    Config.RespawnTool = not Config.RespawnTool
+    updateRespawnBtnUI()
+end)
+
+-- Summon tool
+local SummonBtn = make("TextButton", {
+    Size = UDim2.new(1, -12, 0, 26),
+    Position = UDim2.new(0, 6, 0, nextCfgY(26)),
+    BackgroundColor3 = C.panel2,
+    BorderColor3 = C.accent,
+    BorderSizePixel = 1,
+    Text = "[ > SUMMON TOOL AGAIN < ]",
+    TextColor3 = C.accent,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SettingsConfigContent)
+bindTooltip(SummonBtn, "Instantly gives you a fresh Telekinesis tool in your Backpack if lost or deleted.")
+
+SummonBtn.MouseButton1Click:Connect(function()
+    if LocalPlayer.Character then
+        setupTool(LocalPlayer.Character)
+        notify("Tool Summoned", "Telekinesis placed in Backpack.", 2)
+    end
+end)
+
+SettingsConfigContent.CanvasSize = UDim2.new(0, 0, 0, cfgY)
+
+---------------------------------------------------------
+-- SETTINGS: KEYBINDS SUB-TAB (remapping + reset)
+---------------------------------------------------------
+local keybindButtons = {}
+for i, data in ipairs(keybindDefinitions) do
+    local frame = make("Frame", {
+        Size = UDim2.new(1, -12, 0, 24),
+        Position = UDim2.new(0, 6, 0, (i - 1) * 26 + 6),
+        BackgroundColor3 = C.row,
+        BorderColor3 = C.border,
+        BorderSizePixel = 1,
+    }, SettingsKeybindContent)
+
+    make("TextLabel", {
+        Size = UDim2.new(0.6, -10, 1, 0),
+        Position = UDim2.new(0, 6, 0, 0),
+        BackgroundTransparency = 1,
+        Text = "> " .. data.desc,
+        TextColor3 = C.text,
+        Font = Enum.Font.Code,
+        TextSize = 11,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, frame)
+
+    local KeyBtn = make("TextButton", {
+        Size = UDim2.new(0.38, -4, 1, -4),
+        Position = UDim2.new(0.62, 0, 0, 2),
+        BackgroundColor3 = C.field,
+        BorderColor3 = C.border,
+        BorderSizePixel = 1,
+        Text = getKeyName(Keybinds[data.id]),
+        TextColor3 = C.accent,
+        Font = Enum.Font.Code,
+        TextSize = 11,
+    }, frame)
+
+    keybindButtons[data.id] = KeyBtn
+
+    KeyBtn.MouseButton1Click:Connect(function()
+        if isBindingKey then
+            keybindButtons[isBindingKey].Text = getKeyName(Keybinds[isBindingKey])
+            keybindButtons[isBindingKey].TextColor3 = C.accent
+        end
+        isBindingKey = data.id
+        KeyBtn.Text = "[ PRESS KEY ]"
+        KeyBtn.TextColor3 = C.yellow
+    end)
+
+    bindTooltip(frame, "Click the button to remap the keybind for: " .. data.desc)
+end
+
+-- Reset keybinds button
+local ResetKeybindsBtn = make("TextButton", {
+    Size = UDim2.new(1, -12, 0, 26),
+    Position = UDim2.new(0, 6, 0, #keybindDefinitions * 26 + 6),
+    BackgroundColor3 = C.row,
+    BorderColor3 = C.border2,
+    BorderSizePixel = 1,
+    Text = "[ RESET ALL KEYBINDS ]",
+    TextColor3 = C.yellow,
+    Font = Enum.Font.Code,
+    TextSize = 11,
+}, SettingsKeybindContent)
+bindTooltip(ResetKeybindsBtn, "Restores every keybind to its default value.")
+
+local function resetKeybinds()
+    for k, v in pairs(DefaultKeybinds) do Keybinds[k] = v end
+    for id, btn in pairs(keybindButtons) do
+        btn.Text = getKeyName(Keybinds[id])
+        btn.TextColor3 = C.accent
+    end
+    for _, fn in pairs(mainLabels) do fn() end
+    notify("KEYBINDS", "Restored defaults.", 2)
+end
+
+ResetKeybindsBtn.MouseButton1Click:Connect(resetKeybinds)
+SettingsKeybindContent.CanvasSize = UDim2.new(0, 0, 0, #keybindDefinitions * 26 + 40)
+
+---------------------------------------------------------
+-- KEYBIND REMAP LISTENER (with conflict warning)
+---------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input)
+    if not isBindingKey then return end
+    if input.UserInputType == Enum.UserInputType.Keyboard then
+        if input.KeyCode == Enum.KeyCode.Escape then
+            isBindingKey = nil
+            return
+        end
+        Keybinds[isBindingKey] = input.KeyCode
+    elseif input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.MouseButton2
+        or input.UserInputType == Enum.UserInputType.MouseButton3 then
+        Keybinds[isBindingKey] = input.UserInputType
+    else
+        return
+    end
+
+    local boundId = isBindingKey
+    isBindingKey = nil
+
+    for k, v in pairs(Keybinds) do
+        if k ~= boundId and v == Keybinds[boundId] then
+            notify("WARN", "Duplicate bind on '" .. k .. "'", 3)
+            break
+        end
+    end
+
+    keybindButtons[boundId].Text = getKeyName(Keybinds[boundId])
+    keybindButtons[boundId].TextColor3 = C.accent
+    if mainLabels[boundId] then mainLabels[boundId]() end
+end)
+
+-- (PART 1/2 COMPLETE — append PART 2/2 below)
+---------------------------------------------------------
+-- PART 2A: LASER RENDER LOOP (shared, no leaks)
+---------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    local char = LocalPlayer.Character
+    local handle = char and char:FindFirstChild("Telekinesis") and char:FindFirstChild("Telekinesis"):FindFirstChild("Handle")
+
+    -- Aim orb + laser
+    local Point = handle and handle.Parent:FindFirstChild("AimOrb")
+
+    if mousedown and handle then
+        local targetPos = object and object.Position or Mouse.Hit.Position
+        local diff = handle.Position - targetPos
+        local len = diff.Magnitude
+
+        if len > 0.1 then
+            LaserPart.Parent = workspace
+            LaserPart.CFrame = CFrame.new(handle.Position:Lerp(targetPos, 0.5), targetPos)
+            LaserMesh.Scale = Vector3.new(0.2, 0.2, len)
+        else
+            LaserPart.Parent = nil
+        end
+
+        if Point then
+            Point.Transparency = 0.6
+            Point.CFrame = CFrame.new(targetPos)
+        end
+    else
+        LaserPart.Parent = nil
+        if Point then Point.Transparency = 1 end
+    end
+end)
+
+---------------------------------------------------------
+-- TARGETING & COLLISION HELPERS
+---------------------------------------------------------
+local function setAssemblyCollision(rootPart, canCollide)
+    if not rootPart then return end
+    local parts = {}
+    if rootPart.AssemblyRootPart then
+        parts = rootPart.AssemblyRootPart:GetConnectedParts(true)
+    else
+        table.insert(parts, rootPart)
+    end
+    for _, p in ipairs(parts) do
+        if p:IsA("BasePart") then p.CanCollide = canCollide end
+    end
+end
+
+local function applyThrowPhase(rootPart, duration)
+    local mode = NoclipModes[Config.NoclipModeIndex]
+    if mode == "DISABLED" then
+        setAssemblyCollision(rootPart, true)
+        return
+    end
+    if mode == "ALWAYS" or mode == "UPON THROW" then
+        setAssemblyCollision(rootPart, false)
+        task.spawn(function()
+            local startTime = tick()
+            while (tick() - startTime < (duration or 2.5)) and rootPart and rootPart.Parent do
+                setAssemblyCollision(rootPart, false)
+                task.wait(0.1)
+            end
+            if mode ~= "ALWAYS" and rootPart and rootPart.Parent then
+                setAssemblyCollision(rootPart, true)
+            end
+        end)
+    elseif mode == "UPON HOLD" then
+        setAssemblyCollision(rootPart, true)
+    end
+end
+
+local function getHoveredPlayer()
+    local mousePos = UserInputService:GetMouseLocation()
+    local ray = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+    local rayParams = RaycastParams.new()
+    rayParams.FilterDescendantsInstances = {LocalPlayer.Character, object}
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+
+    local result = workspace:Raycast(ray.Origin, ray.Direction * 1000, rayParams)
+    if result and result.Instance then
+        local model = result.Instance:FindFirstAncestorOfClass("Model")
+        if model and model:FindFirstChildOfClass("Humanoid") and model ~= LocalPlayer.Character then
+            return model
+        end
+    end
+
+    local bestChar, bestDist = nil, 140
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+            local hrp = player.Character.HumanoidRootPart
+            local screenPos, onScreen = Camera:WorldToViewportPoint(hrp.Position)
+            if onScreen then
+                local d2 = (Vector2.new(mousePos.X, mousePos.Y) - Vector2.new(screenPos.X, screenPos.Y)).Magnitude
+                if d2 < bestDist then
+                    bestDist = d2
+                    bestChar = player.Character
+                end
+            end
+        end
+    end
+    return bestChar
+end
+
+---------------------------------------------------------
+-- RELEASE / CLEANUP (single source of truth)
+---------------------------------------------------------
+local function releaseObject()
+    mousedown = false
+    BP.Parent = nil
+    LaserPart.Parent = nil
+    ObjectHighlight.Adornee = nil
+    ObjectHighlight.Enabled = false
+    TargetHighlight.Adornee = nil
+    TargetHighlight.Enabled = false
+
+    if lockGyro then lockGyro:Destroy() lockGyro = nil end
+    lockActive = false
+    if spinAV then spinAV:Destroy() spinAV = nil end
+    spinActive = false
+    frozenRoot = nil
+    recalling = false
+
+    if object then
+        if NoclipModes[Config.NoclipModeIndex] == "UPON HOLD" then
+            setAssemblyCollision(object, true)
+        end
+    end
+    object = nil
+    updateStatus()
+end
+
+---------------------------------------------------------
+-- CORE ACTIONS
+---------------------------------------------------------
+local function applyForceToRoot(part, velocity, flightDuration)
+    if not part then return end
+    local root = part.AssemblyRootPart or part
+    root.Anchored = false
+    pcall(function()
+        root.CustomPhysicalProperties = PhysicalProperties.new(100, 0.5, 0.1, 1, 1)
+    end)
+    applyThrowPhase(root, flightDuration or 2.5)
+    root.AssemblyLinearVelocity = velocity
+    root.AssemblyAngularVelocity = Vector3.new(math.random(-15, 15), math.random(-15, 15), math.random(-15, 15))
+    pcall(function() root.Velocity = velocity end)
+end
+
+local function throwObject(force)
+    if not object or not object.Parent then return end
+    local targetObj = object
+    local mousePos = UserInputService:GetMouseLocation()
+    local ray = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+    releaseObject()
+    applyForceToRoot(targetObj, ray.Direction * force, 2.5)
+end
+
+local function snipePlayer()
+    if not object or not object.Parent then return end
+
+    local targetChar = getHoveredPlayer()
+    local targetPart = targetChar and (targetChar:FindFirstChild("HumanoidRootPart") or targetChar:FindFirstChild("Head"))
+    local targetPos = nil
+    if not targetPart then
+        local mousePos = UserInputService:GetMouseLocation()
+        local ray = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+        targetPos = ray.Origin + (ray.Direction * 300)
+    end
+
+    local proj = object.AssemblyRootPart or object
+    releaseObject()
+
+    proj.Anchored = false
+    pcall(function()
+        proj.CustomPhysicalProperties = PhysicalProperties.new(100, 0.5, 0.1, 1, 1)
+    end)
+    applyThrowPhase(proj, 2.0)
+
+    local att = Instance.new("Attachment")
+    att.Parent = proj
+    local lv = Instance.new("LinearVelocity")
+    lv.MaxForce = math.huge
+    lv.VectorVelocity = Vector3.zero
+    lv.Attachment0 = att
+    lv.RelativeTo = Enum.ActuatorRelativeTo.World
+    lv.Parent = proj
+
+    task.spawn(function()
+        local startTime = tick()
+        while proj and proj.Parent and (tick() - startTime < 2.0) do
+            local currentDest = (targetPart and targetPart.Parent and targetPart.Position) or targetPos
+            local diff = currentDest - proj.Position
+            if diff.Magnitude < 4 then break end
+            lv.VectorVelocity = diff.Unit * Config.SnipeVelocity
+            task.wait()
+        end
+        if lv then lv:Destroy() end
+        if att then att:Destroy() end
+    end)
+end
+
+local function toggleFreeze()
+    if not object then return end
+    local root = object.AssemblyRootPart or object
+    if frozenRoot == root then
+        root.Anchored = false
+        frozenRoot = nil
+        ObjectHighlight.FillColor = C.accent2
+    else
+        root.Anchored = true
+        frozenRoot = root
+        ObjectHighlight.FillColor = C.red
+    end
+    updateStatus()
+end
+
+-- Orbit runs in its OWN loop so it survives button release
+task.spawn(function()
+    while true do
+        if orbitActive then
+            local obj = object
+            local char = LocalPlayer.Character
+            if obj and obj.Parent and char and char:FindFirstChild("HumanoidRootPart") then
+                orbitAngle = orbitAngle + 0.05
+                local root = char.HumanoidRootPart
+                local offset = Vector3.new(math.cos(orbitAngle) * Config.OrbitRadius, 2, math.sin(orbitAngle) * Config.OrbitRadius)
+                BP.Parent = obj
+                BP.Position = root.Position + offset
+            end
+        end
+        task.wait()
+    end
+end)
+
+local function toggleOrbit()
+    if not object then return end
+    orbitActive = not orbitActive
+    if orbitActive then
+        if not mousedown then mousedown = true end -- keep object floating after release
+        notify("ORBIT", "Enabled - object will float", 1.5)
+    else
+        if not mousedown then
+            releaseObject() -- button already released -> drop
+        end
+    end
+    updateStatus()
+end
+
+local function toggleSpin()
+    if not object then return end
+    local root = object.AssemblyRootPart or object
+    if spinActive then
+        if spinAV then spinAV:Destroy() spinAV = nil end
+        spinActive = false
+        root.AssemblyAngularVelocity = Vector3.zero
+    else
+        spinAV = Instance.new("BodyAngularVelocity")
+        spinAV.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        spinAV.AngularVelocity = Vector3.new(0, 15, 0)
+        spinAV.Parent = root
+        spinActive = true
+    end
+    updateStatus()
+end
+
+local function toggleLock()
+    if not object then return end
+    local root = object.AssemblyRootPart or object
+    if lockActive then
+        if lockGyro then lockGyro:Destroy() lockGyro = nil end
+        lockActive = false
+    else
+        lockGyro = Instance.new("BodyGyro")
+        lockGyro.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+        lockGyro.D = 300
+        lockGyro.P = 9000
+        lockGyro.CFrame = root.CFrame
+        lockGyro.Parent = root
+        lockActive = true
+    end
+end
+
+local function recallObject()
+    if not object then return end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    local root = char.HumanoidRootPart
+    local obj = object
+    local startPos = obj.Position
+    local startTime = tick()
+    recalling = true
+    task.spawn(function()
+        while recalling and obj and obj.Parent and (tick() - startTime < 1.5) do
+            local t = (tick() - startTime) / 1.5
+            BP.Parent = obj
+            BP.Position = startPos:Lerp(root.Position + Vector3.new(0, 3, 0), t)
+            task.wait()
+        end
+        recalling = false
+    end)
+end
+
+local function magnetPull()
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+    local root = char.HumanoidRootPart
+    local radius, pulled = Config.MagnetRadius, 0
+
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if v:IsA("BasePart") and not v.Anchored and v.CanCollide then
+            local isSelf = false
+            if LocalPlayer.Character then
+                isSelf = v:IsDescendantOf(LocalPlayer.Character)
+            end
+            if not isSelf and v ~= object then
+                local d = (v.Position - root.Position).Magnitude
+                if d <= radius and v.AssemblyLinearVelocity.Magnitude < 5 then
+                    v.AssemblyLinearVelocity = (root.Position - v.Position).Unit * 80
+                    pulled = pulled + 1
+                end
+            end
+        end
+    end
+    notify("MAGNET PULL", "Pulled " .. pulled .. " object(s)", 2)
+end
+
+local function resetRotation()
+    if not object then return end
+    local root = object.AssemblyRootPart or object
+    local startTime = tick()
+
+    local BG = Instance.new("BodyGyro")
+    BG.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+    BG.D = 300
+    BG.P = 12000
+    BG.CFrame = CFrame.new(root.Position)
+    BG.Parent = root
+
+    task.spawn(function()
+        while BG.Parent and (tick() - startTime < 1.5) do
+            task.wait()
+        end
+        BG:Destroy()
+        if root and root.Parent then
+            root.AssemblyLinearVelocity = Vector3.zero
+            root.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+end
+
+-- (PART 2A COMPLETE — say "continue" for PART 2B: input handlers, grab loop, tool setup, spawn handling)
+---------------------------------------------------------
+-- PART 2B: GRAB STATE, ENHANCED ORBIT, INPUT, TOOL SETUP
+---------------------------------------------------------
+local grabHeld = false -- physical grab button currently pressed
+
+-- Enhanced orbit toggle (wraps the Part 2A version so it
+-- knows whether the grab button is physically held)
+local _toggleOrbit = toggleOrbit
+toggleOrbit = function()
+    if not object then return end
+    orbitActive = not orbitActive
+
+    if orbitActive then
+        if not grabHeld then
+            mousedown = true -- keep object floating without holding
+        end
+        notify("ORBIT", "Enabled - object will float", 1.5)
+    else
+        if not grabHeld then
+            releaseObject()
+        end
+    end
+    updateStatus()
+end
+
+local function matchesInput(input, boundVal)
+    if not boundVal then return false end
+    if typeof(boundVal) == "EnumItem" then
+        if boundVal.EnumType == Enum.KeyCode then
+            return input.KeyCode == boundVal
+        elseif boundVal.EnumType == Enum.UserInputType then
+            return input.UserInputType == boundVal
+        end
+    end
+    return false
+end
+
+local function isGrabInput(input)
+    return matchesInput(input, Keybinds.Grab)
+end
+
+---------------------------------------------------------
+-- PICK PHASE: grab the object under the crosshair
+---------------------------------------------------------
+local function startHold()
+    if mousedown then return end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("Telekinesis") then return end
+    local tool = char:FindFirstChild("Telekinesis")
+    local handle = tool:FindFirstChild("Handle")
+    if not handle then return end
+
+    mousedown = true
+    updateStatus()
+
+    local deadline = tick() + 0.75
+    while mousedown and tick() < deadline do
+        if Mouse.Target ~= nil then
+            local target = Mouse.Target
+            if not target.Anchored
+                and not target:IsDescendantOf(char)
+                and not target:IsA("Terrain") then
+                object = target
+                dist = math.max((object.Position - handle.Position).Magnitude, 5)
+                ObjectHighlight.Adornee = object
+                ObjectHighlight.Enabled = true
+
+                local mode = NoclipModes[Config.NoclipModeIndex]
+                if mode == "UPON HOLD" or mode == "ALWAYS" then
+                    setAssemblyCollision(object, false)
+                end
+                updateStatus()
+                return
+            end
+        end
+        task.wait()
+    end
+end
+
+---------------------------------------------------------
+-- HOLD LOOP: drag / orbit / lock / noclip upkeep
+---------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    if not mousedown or not object then return end
+
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("Telekinesis") then return end
+    local handle = char:FindFirstChild("Telekinesis"):FindFirstChild("Handle")
+    if not handle then return end
+
+    if object.Parent == nil then
+        releaseObject()
+        return
+    end
+
+    local root = object.AssemblyRootPart or object
+
+    -- Clear stale frozen state if the assembly got unanchored externally
+    if frozenRoot == root and not root.Anchored then
+        frozenRoot = nil
+        ObjectHighlight.FillColor = C.accent2
+    end
+
+    if not orbitActive then
+        local look = CFrame.new(handle.Position, Mouse.Hit.Position)
+        BP.Parent = root
+        BP.Position = handle.Position + look.LookVector * dist
+    end
+
+    -- Keep rotation lock gyro refreshed to current orientation
+    if lockActive and lockGyro and lockGyro.Parent then
+        lockGyro.CFrame = root.CFrame
+    end
+
+    -- Noclip upkeep
+    local mode = NoclipModes[Config.NoclipModeIndex]
+    if mode == "UPON HOLD" or mode == "ALWAYS" then
+        setAssemblyCollision(root, false)
+    end
+end)
+
+---------------------------------------------------------
+-- SNIPE TARGET HIGHLIGHT (hover)
+---------------------------------------------------------
+RunService.RenderStepped:Connect(function()
+    if object and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Telekinesis") then
+        local hovered = getHoveredPlayer()
+        if hovered then
+            TargetHighlight.Adornee = hovered
+            TargetHighlight.Enabled = true
+        else
+            TargetHighlight.Adornee = nil
+            TargetHighlight.Enabled = false
+        end
+    else
+        TargetHighlight.Adornee = nil
+        TargetHighlight.Enabled = false
+    end
+end)
+
+---------------------------------------------------------
+-- GLOBAL INPUT EXECUTION
+---------------------------------------------------------
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or isBindingKey then return end
+    local char = LocalPlayer.Character
+    if not char or not char:FindFirstChild("Telekinesis") then return end
+
+    if isGrabInput(input) then
+        grabHeld = true
+        startHold()
+    elseif matchesInput(input, Keybinds.PullCloser) then
+        if dist >= 5 then dist = dist - 10 end
+    elseif matchesInput(input, Keybinds.PushFurther) then
+        dist = dist + 10
+    elseif matchesInput(input, Keybinds.Freeze) then
+        toggleFreeze()
+    elseif matchesInput(input, Keybinds.Orbit) then
+        toggleOrbit()
+    elseif matchesInput(input, Keybinds.Spin) then
+        toggleSpin()
+    elseif matchesInput(input, Keybinds.LockRotation) then
+        toggleLock()
+    elseif matchesInput(input, Keybinds.Recall) then
+        recallObject()
+    elseif matchesInput(input, Keybinds.Throw) then
+        throwObject(Config.ThrowVelocity)
+    elseif matchesInput(input, Keybinds.Launch) then
+        throwObject(Config.LaunchVelocity)
+    elseif matchesInput(input, Keybinds.Snipe) or matchesInput(input, Keybinds.SnipeMouse) then
+        snipePlayer()
+    elseif matchesInput(input, Keybinds.ResetRotation) then
+        resetRotation()
+    elseif matchesInput(input, Keybinds.MagnetPull) then
+        magnetPull()
+    elseif matchesInput(input, Keybinds.ToggleSimRadius) then
+        toggleNet(not Config.SimRadiusEnabled)
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if isGrabInput(input) then
+        grabHeld = false
+        if not orbitActive then
+            releaseObject()
+        end
+    end
+end)
+
+---------------------------------------------------------
+-- TOOL SETUP & SPAWN HANDLER
+---------------------------------------------------------
+setupTool = function(character)
+    if not character then return end
+    if currentToolInstance and currentToolInstance.Parent then
+        currentToolInstance:Destroy()
+    end
+
+    local Tool = Instance.new("Tool")
+    Tool.Name = "Telekinesis"
+    currentToolInstance = Tool
+
+    local Handle = Instance.new("Part")
+    Handle.Name = "Handle"
+    Handle.Size = Vector3.new(1, 1.2, 1)
+    Handle.Transparency = 1
+    Handle.CanCollide = false
+    Handle.BrickColor = BrickColor.new("Really black")
+    Handle.Material = Enum.Material.Metal
+    Handle.Parent = Tool
+
+    Tool.Grip = CFrame.new(0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0)
+    Tool.GripForward = Vector3.new(0, -1, 0)
+    Tool.GripRight = Vector3.new(0, 0, 1)
+    Tool.GripUp = Vector3.new(1, 0, 0)
+
+    -- Aim orb (visible while holding, rendered by Part 2A laser loop)
+    local Point = Instance.new("Part")
+    Point.Name = "AimOrb"
+    Point.Locked = true
+    Point.Anchored = true
+    Point.Shape = Enum.PartType.Ball
+    Point.BrickColor = BrickColor.new("Really black")
+    Point.Size = Vector3.new(1, 1, 1)
+    Point.CanCollide = false
+    Point.Transparency = 1
+    Point.Parent = Tool
+
+    local PointMesh = Instance.new("SpecialMesh")
+    PointMesh.MeshType = Enum.MeshType.Sphere
+    PointMesh.Scale = Vector3.new(0.7, 0.7, 0.7)
+    PointMesh.Parent = Point
+
+    Tool.Equipped:Connect(function(mouse)
+        local hum = character:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.Died:Connect(function()
+                releaseObject()
+                if currentToolInstance == Tool then currentToolInstance = nil end
+                Tool:Destroy()
+            end)
+        end
+
+        pcall(function()
+            mouse.Icon = "rbxasset://textures\\GunCursor.png"
+        end)
+    end)
+
+    Tool.Unequipped:Connect(function()
+        orbitActive = false
+        grabHeld = false
+        releaseObject()
+    end)
+
+    Tool.Parent = LocalPlayer:WaitForChild("Backpack")
+end
+
+-- Initialize on current character
+if LocalPlayer.Character then
+    setupTool(LocalPlayer.Character)
+end
+
+-- Respawn listener
+LocalPlayer.CharacterAdded:Connect(function(newChar)
+    task.wait(0.5)
+    orbitActive = false
+    grabHeld = false
+    releaseObject()
+    if Config.RespawnTool then
+        setupTool(newChar)
+    end
+end)
+
+-- Cleanup on leave
+game:BindToClose(function()
+    pcall(function()
+        if simConnection then simConnection:Disconnect() end
+        LaserPart:Destroy()
+        ObjectHighlight:Destroy()
+        TargetHighlight:Destroy()
+        ScreenGui:Destroy()
+        if currentToolInstance then currentToolInstance:Destroy() end
+    end)
+end)
+
+print("[Telekinesis v3] Loaded successfully — script complete.")
