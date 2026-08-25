@@ -10,7 +10,7 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 local Mouse = LocalPlayer:GetMouse()
 
--- Exploit helpers (never error if unavailable)
+-- Exploit helpers (never error if unavailable) might update this
 local setHidden = sethiddenproperty or set_hidden_property or set_hidden_prop
 local setSimRadius = setsimulationradius or set_simulation_radius
 local simConnection = nil
