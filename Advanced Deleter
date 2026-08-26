@@ -1,0 +1,577 @@
+local Players = game:GetService("Players")
+local Workspace = game:GetService("Workspace")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+
+local LocalPlayer = Players.LocalPlayer
+local Mouse = LocalPlayer:GetMouse()
+-- Configuration
+local ToolState = {
+    Mode = "Single", -- Single, Model, Radius, ClassFilter, Inspector
+    Radius = 15,
+    FilterType = "Decals & Textures",
+    ProtectProps = true,
+    ProtectPlayers = true,
+    ProtectTerrain = true,
+    UndoStack = {}
+}
+
+local UndoStorage = Instance.new("Folder")
+UndoStorage.Name = "undostorage"
+
+if CoreGui:FindFirstChild("femboydeletegui") then
+    CoreGui.femboydeletegui:Destroy()
+end
+
+-- Create HUD ScreenGui
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "femboydeletegui"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Enabled = false
+ScreenGui.Parent = CoreGui
+
+-- Main Control HUD Frame
+local MainFrame = Instance.new("Frame")
+MainFrame.Name = "MainFrame"
+MainFrame.Size = UDim2.new(0, 300, 0, 240)
+MainFrame.Position = UDim2.new(1, -320, 0.5, -120)
+MainFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 25)
+MainFrame.BorderSizePixel = 0
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+
+local UICorner = Instance.new("UICorner")
+UICorner.CornerRadius = UDim.new(0, 8)
+UICorner.Parent = MainFrame
+
+local UIStroke = Instance.new("UIStroke")
+UIStroke.Color = Color3.fromRGB(255, 60, 60)
+UIStroke.Thickness = 1
+UIStroke.Parent = MainFrame
+
+-- Title Bar
+local TitleBar = Instance.new("Frame")
+TitleBar.Size = UDim2.new(1, 0, 0, 32)
+TitleBar.BackgroundColor3 = Color3.fromRGB(30, 30, 38)
+TitleBar.BorderSizePixel = 0
+TitleBar.Parent = MainFrame
+
+local TitleCorner = Instance.new("UICorner")
+TitleCorner.CornerRadius = UDim.new(0, 8)
+TitleCorner.Parent = TitleBar
+
+local TitleLabel = Instance.new("TextLabel")
+TitleLabel.Size = UDim2.new(1, -10, 1, 0)
+TitleLabel.Position = UDim2.new(0, 10, 0, 0)
+TitleLabel.BackgroundTransparency = 1
+TitleLabel.Text = "Advanced Destroyer"
+TitleLabel.TextColor3 = Color3.fromRGB(255, 80, 80)
+TitleLabel.Font = Enum.Font.GothamBold
+TitleLabel.TextSize = 13
+TitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+TitleLabel.Parent = TitleBar
+
+-- Container
+local Container = Instance.new("Frame")
+Container.Size = UDim2.new(1, -16, 1, -40)
+Container.Position = UDim2.new(0, 8, 0, 36)
+Container.BackgroundTransparency = 1
+Container.Parent = MainFrame
+
+local UIList = Instance.new("UIListLayout")
+UIList.Padding = UDim.new(0, 6)
+UIList.SortOrder = Enum.SortOrder.LayoutOrder
+UIList.Parent = Container
+
+-- Target Status Label
+local TargetInfo = Instance.new("TextLabel")
+TargetInfo.Size = UDim2.new(1, 0, 0, 24)
+TargetInfo.BackgroundColor3 = Color3.fromRGB(28, 28, 34)
+TargetInfo.Text = "Target: None"
+TargetInfo.TextColor3 = Color3.fromRGB(200, 200, 210)
+TargetInfo.Font = Enum.Font.Gotham
+TargetInfo.TextSize = 11
+TargetInfo.Parent = Container
+
+local TargetCorner = Instance.new("UICorner")
+TargetCorner.CornerRadius = UDim.new(0, 4)
+TargetCorner.Parent = TargetInfo
+
+-- Mode Switcher Button
+local ModeBtn = Instance.new("TextButton")
+ModeBtn.Size = UDim2.new(1, 0, 0, 30)
+ModeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+ModeBtn.Text = "Mode: Single Part [Click to Switch]"
+ModeBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+ModeBtn.Font = Enum.Font.GothamBold
+ModeBtn.TextSize = 11
+ModeBtn.Parent = Container
+
+local ModeCorner = Instance.new("UICorner")
+ModeCorner.CornerRadius = UDim.new(0, 4)
+ModeCorner.Parent = ModeBtn
+
+-- Filter / Radius Config Button
+local ConfigBtn = Instance.new("TextButton")
+ConfigBtn.Size = UDim2.new(1, 0, 0, 30)
+ConfigBtn.BackgroundColor3 = Color3.fromRGB(35, 35, 44)
+ConfigBtn.Text = "Radius: 15 studs [R to Change]"
+ConfigBtn.TextColor3 = Color3.fromRGB(220, 220, 230)
+ConfigBtn.Font = Enum.Font.GothamSemibold
+ConfigBtn.TextSize = 11
+ConfigBtn.Parent = Container
+
+local ConfigCorner = Instance.new("UICorner")
+ConfigCorner.CornerRadius = UDim.new(0, 4)
+ConfigCorner.Parent = ConfigBtn
+
+-- Undo Last Delete Button
+local UndoBtn = Instance.new("TextButton")
+UndoBtn.Size = UDim2.new(1, 0, 0, 30)
+UndoBtn.BackgroundColor3 = Color3.fromRGB(50, 120, 60)
+UndoBtn.Text = "Undo Last Delete (Stack: 0) [Z]"
+UndoBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+UndoBtn.Font = Enum.Font.GothamBold
+UndoBtn.TextSize = 11
+UndoBtn.Parent = Container
+
+local UndoCorner = Instance.new("UICorner")
+UndoCorner.CornerRadius = UDim.new(0, 4)
+UndoCorner.Parent = UndoBtn
+
+-- Safeguard Toggle Button
+local SafeBtn = Instance.new("TextButton")
+SafeBtn.Size = UDim2.new(1, 0, 0, 30)
+SafeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+SafeBtn.Text = "Props Protection: ENABLED"
+SafeBtn.TextColor3 = Color3.fromRGB(100, 220, 100)
+SafeBtn.Font = Enum.Font.GothamBold
+SafeBtn.TextSize = 11
+SafeBtn.Parent = Container
+
+local SafeCorner = Instance.new("UICorner")
+SafeCorner.CornerRadius = UDim.new(0, 4)
+SafeCorner.Parent = SafeBtn
+
+-- ON-SCREEN INSPECTOR HUD PANEL
+local InspectorFrame = Instance.new("Frame")
+InspectorFrame.Name = "InspectorFrame"
+InspectorFrame.Size = UDim2.new(0, 320, 0, 310)
+InspectorFrame.Position = UDim2.new(1, -650, 0.5, -155)
+InspectorFrame.BackgroundColor3 = Color3.fromRGB(18, 18, 24)
+InspectorFrame.BorderSizePixel = 0
+InspectorFrame.Active = true
+InspectorFrame.Draggable = true
+InspectorFrame.Visible = false
+InspectorFrame.Parent = ScreenGui
+
+local InspectorCorner = Instance.new("UICorner")
+InspectorCorner.CornerRadius = UDim.new(0, 8)
+InspectorCorner.Parent = InspectorFrame
+
+local InspectorStroke = Instance.new("UIStroke")
+InspectorStroke.Color = Color3.fromRGB(80, 160, 255)
+InspectorStroke.Thickness = 1.5
+InspectorStroke.Parent = InspectorFrame
+
+-- Inspector Title Bar
+local InspTitleBar = Instance.new("Frame")
+InspTitleBar.Size = UDim2.new(1, 0, 0, 34)
+InspTitleBar.BackgroundColor3 = Color3.fromRGB(28, 28, 38)
+InspTitleBar.BorderSizePixel = 0
+InspTitleBar.Parent = InspectorFrame
+
+local InspTitleCorner = Instance.new("UICorner")
+InspTitleCorner.CornerRadius = UDim.new(0, 8)
+InspTitleCorner.Parent = InspTitleBar
+
+local InspTitleLabel = Instance.new("TextLabel")
+InspTitleLabel.Size = UDim2.new(1, -40, 1, 0)
+InspTitleLabel.Position = UDim2.new(0, 12, 0, 0)
+InspTitleLabel.BackgroundTransparency = 1
+InspTitleLabel.Text = "Target Properties Inspector"
+InspTitleLabel.TextColor3 = Color3.fromRGB(80, 180, 255)
+InspTitleLabel.Font = Enum.Font.GothamBold
+InspTitleLabel.TextSize = 13
+InspTitleLabel.TextXAlignment = Enum.TextXAlignment.Left
+InspTitleLabel.Parent = InspTitleBar
+
+local InspCloseBtn = Instance.new("TextButton")
+InspCloseBtn.Size = UDim2.new(0, 24, 0, 24)
+InspCloseBtn.Position = UDim2.new(1, -28, 0, 5)
+InspCloseBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 60)
+InspCloseBtn.Text = "X"
+InspCloseBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+InspCloseBtn.Font = Enum.Font.GothamBold
+InspCloseBtn.TextSize = 12
+InspCloseBtn.Parent = InspTitleBar
+
+local InspCloseCorner = Instance.new("UICorner")
+InspCloseCorner.CornerRadius = UDim.new(0, 6)
+InspCloseCorner.Parent = InspCloseBtn
+
+InspCloseBtn.MouseButton1Click:Connect(function()
+    InspectorFrame.Visible = false
+end)
+
+-- Inspector Content Scrolling Container
+local InspContent = Instance.new("ScrollingFrame")
+InspContent.Size = UDim2.new(1, -16, 1, -44)
+InspContent.Position = UDim2.new(0, 8, 0, 38)
+InspContent.BackgroundTransparency = 1
+InspContent.BorderSizePixel = 0
+InspContent.ScrollBarThickness = 4
+InspContent.ScrollBarImageColor3 = Color3.fromRGB(80, 160, 255)
+InspContent.Parent = InspectorFrame
+
+local InspList = Instance.new("UIListLayout")
+InspList.Padding = UDim.new(0, 4)
+InspList.SortOrder = Enum.SortOrder.LayoutOrder
+InspList.Parent = InspContent
+
+InspList:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+    InspContent.CanvasSize = UDim2.new(0, 0, 0, InspList.AbsoluteContentSize.Y + 10)
+end)
+
+-- Helper to add property rows to Inspector
+local function addPropertyRow(key, value)
+    local Row = Instance.new("Frame")
+    Row.Size = UDim2.new(1, -6, 0, 24)
+    Row.BackgroundColor3 = Color3.fromRGB(25, 25, 34)
+    Row.BorderSizePixel = 0
+    Row.Parent = InspContent
+
+    local RowCorner = Instance.new("UICorner")
+    RowCorner.CornerRadius = UDim.new(0, 4)
+    RowCorner.Parent = Row
+
+    local KeyLbl = Instance.new("TextLabel")
+    KeyLbl.Size = UDim2.new(0, 100, 1, 0)
+    KeyLbl.Position = UDim2.new(0, 8, 0, 0)
+    KeyLbl.BackgroundTransparency = 1
+    KeyLbl.Text = key
+    KeyLbl.TextColor3 = Color3.fromRGB(140, 180, 240)
+    KeyLbl.Font = Enum.Font.GothamBold
+    KeyLbl.TextSize = 11
+    KeyLbl.TextXAlignment = Enum.TextXAlignment.Left
+    KeyLbl.Parent = Row
+
+    local ValLbl = Instance.new("TextLabel")
+    ValLbl.Size = UDim2.new(1, -114, 1, 0)
+    ValLbl.Position = UDim2.new(0, 108, 0, 0)
+    ValLbl.BackgroundTransparency = 1
+    ValLbl.Text = tostring(value)
+    ValLbl.TextColor3 = Color3.fromRGB(230, 230, 240)
+    ValLbl.Font = Enum.Font.Gotham
+    ValLbl.TextSize = 11
+    ValLbl.TextXAlignment = Enum.TextXAlignment.Left
+    ValLbl.TextTruncate = Enum.TextTruncate.AtEnd
+    ValLbl.Parent = Row
+end
+
+-- Render Inspector Data for a Target Object
+local function displayInspectorData(target)
+    if not target then return end
+
+    -- Clear old property rows
+    for _, child in ipairs(InspContent:GetChildren()) do
+        if child:IsA("Frame") then
+            child:Destroy()
+        end
+    end
+
+    InspectorFrame.Visible = true
+
+    -- Format properties safely
+    addPropertyRow("Name", target.Name)
+    addPropertyRow("ClassName", target.ClassName)
+    addPropertyRow("Path", target:GetFullName())
+
+    if target:IsA("BasePart") then
+        addPropertyRow("Anchored", target.Anchored)
+        addPropertyRow("CanCollide", target.CanCollide)
+        addPropertyRow("Transparency", math.floor(target.Transparency * 100) / 100)
+        addPropertyRow("Material", target.Material.Name)
+        addPropertyRow("Color", string.format("RGB(%d, %d, %d)", target.Color.R * 255, target.Color.G * 255, target.Color.B * 255))
+        addPropertyRow("Size", string.format("%.1f, %.1f, %.1f", target.Size.X, target.Size.Y, target.Size.Z))
+        addPropertyRow("Position", string.format("%.1f, %.1f, %.1f", target.Position.X, target.Position.Y, target.Position.Z))
+    elseif target:IsA("Model") then
+        local cf, size = target:GetBoundingBox()
+        addPropertyRow("Pivot Position", string.format("%.1f, %.1f, %.1f", cf.Position.X, cf.Position.Y, cf.Position.Z))
+        addPropertyRow("Model Size", string.format("%.1f, %.1f, %.1f", size.X, size.Y, size.Z))
+        if target.PrimaryPart then
+            addPropertyRow("PrimaryPart", target.PrimaryPart.Name)
+        end
+    end
+
+    addPropertyRow("Child Count", #target:GetChildren())
+    addPropertyRow("Parent", target.Parent and target.Parent.Name or "None")
+end
+
+-- Target Highlight Box
+local SelectionHighlight = Instance.new("Highlight")
+SelectionHighlight.Name = "DeleteSelectionHighlight"
+SelectionHighlight.FillColor = Color3.fromRGB(255, 50, 50)
+SelectionHighlight.FillTransparency = 0.5
+SelectionHighlight.OutlineColor = Color3.fromRGB(255, 255, 255)
+SelectionHighlight.OutlineTransparency = 0
+SelectionHighlight.Parent = CoreGui
+
+-- Whitelist Inspector
+local function isProtected(target)
+    if not target then return true end
+
+    -- Check Terrain / Baseplate
+    if ToolState.ProtectTerrain and (target:IsA("Terrain") or target.Name == "Baseplate") then
+        return true
+    end
+
+    -- Check Players
+    if ToolState.ProtectPlayers then
+        for _, p in pairs(Players:GetPlayers()) do
+            if p.Character and target:IsDescendantOf(p.Character) then
+                return true
+            end
+        end
+    end
+
+    -- Check Props folder
+    if ToolState.ProtectProps then
+        local propsFolder = Workspace:FindFirstChild("props")
+        if propsFolder and (target == propsFolder or target:IsDescendantOf(propsFolder)) then
+            return true
+        end
+    end
+
+    return false
+end
+
+-- Update Stack Counter Text
+local function updateUndoText()
+    UndoBtn.Text = "Undo Last Delete (Stack: " .. tostring(#ToolState.UndoStack) .. ") [Z]"
+end
+
+-- Save Instance to Undo Stack and Remove
+local function deleteSafely(target)
+    if isProtected(target) then return false end
+
+    local oldParent = target.Parent
+    target.Parent = UndoStorage
+
+    table.insert(ToolState.UndoStack, {
+        Instance = target,
+        OriginalParent = oldParent
+    })
+
+    updateUndoText()
+    return true
+end
+
+-- Undo Action
+local function performUndo()
+    if #ToolState.UndoStack > 0 then
+        local lastData = table.remove(ToolState.UndoStack)
+        if lastData and lastData.Instance then
+            lastData.Instance.Parent = lastData.OriginalParent or Workspace
+            updateUndoText()
+        end
+    end
+end
+
+-- Cycle Tool Modes
+local modes = { "Single", "Model", "Radius", "ClassFilter", "Inspector" }
+local function cycleMode()
+    local currentIndex = table.find(modes, ToolState.Mode) or 1
+    local nextIndex = (currentIndex % #modes) + 1
+    ToolState.Mode = modes[nextIndex]
+
+    if ToolState.Mode == "Single" then
+        ModeBtn.Text = "Mode: Single Part [Click to Switch]"
+        ConfigBtn.Text = "Target: Individual Clicked Part"
+    elseif ToolState.Mode == "Model" then
+        ModeBtn.Text = "Mode: Entire Model/Assembly"
+        ConfigBtn.Text = "Target: Parent Model Container"
+    elseif ToolState.Mode == "Radius" then
+        ModeBtn.Text = "Mode: Radius Explosion"
+        ConfigBtn.Text = "Radius: " .. tostring(ToolState.Radius) .. " studs [Click to Change]"
+    elseif ToolState.Mode == "ClassFilter" then
+        ModeBtn.Text = "Mode: Class Filter"
+        ConfigBtn.Text = "Filter: " .. ToolState.FilterType .. " [Click to Cycle]"
+    elseif ToolState.Mode == "Inspector" then
+        ModeBtn.Text = "Mode: On-Screen Inspector"
+        ConfigBtn.Text = "Click target to inspect properties"
+    end
+end
+
+-- Mode Button Handler
+ModeBtn.MouseButton1Click:Connect(cycleMode)
+
+-- Config Button Handler
+ConfigBtn.MouseButton1Click:Connect(function()
+    if ToolState.Mode == "Radius" then
+        if ToolState.Radius == 15 then
+            ToolState.Radius = 30
+        elseif ToolState.Radius == 30 then
+            ToolState.Radius = 50
+        else
+            ToolState.Radius = 15
+        end
+        ConfigBtn.Text = "Radius: " .. tostring(ToolState.Radius) .. " studs [Click to Change]"
+    elseif ToolState.Mode == "ClassFilter" then
+        if ToolState.FilterType == "Decals & Textures" then
+            ToolState.FilterType = "Lights & Sounds"
+        elseif ToolState.FilterType == "Lights & Sounds" then
+            ToolState.FilterType = "MeshParts & SpecialMeshes"
+        else
+            ToolState.FilterType = "Decals & Textures"
+        end
+        ConfigBtn.Text = "Filter: " .. ToolState.FilterType .. " [Click to Cycle]"
+    end
+end)
+
+-- Undo Button Handler
+UndoBtn.MouseButton1Click:Connect(performUndo)
+
+-- Safeguard Toggle Handler
+SafeBtn.MouseButton1Click:Connect(function()
+    ToolState.ProtectProps = not ToolState.ProtectProps
+    if ToolState.ProtectProps then
+        SafeBtn.Text = "Props Protection: ENABLED"
+        SafeBtn.TextColor3 = Color3.fromRGB(100, 220, 100)
+    else
+        SafeBtn.Text = "Props Protection: DISABLED"
+        SafeBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+    end
+end)
+
+-- Hover Render Loop
+RunService.RenderStepped:Connect(function()
+    if not ScreenGui.Enabled then
+        SelectionHighlight.Adornee = nil
+        return
+    end
+
+    local target = Mouse.Target
+    if target then
+        if isProtected(target) then
+            TargetInfo.Text = "Target: [PROTECTED] " .. target.Name
+            TargetInfo.TextColor3 = Color3.fromRGB(255, 100, 100)
+            SelectionHighlight.FillColor = Color3.fromRGB(255, 0, 0)
+        else
+            TargetInfo.Text = "Target: " .. target.Name .. " (" .. target.ClassName .. ")"
+            TargetInfo.TextColor3 = Color3.fromRGB(100, 220, 100)
+            SelectionHighlight.FillColor = Color3.fromRGB(50, 255, 50)
+        end
+
+        if ToolState.Mode == "Model" and target.Parent and target.Parent:IsA("Model") and target.Parent ~= Workspace then
+            SelectionHighlight.Adornee = target.Parent
+        else
+            SelectionHighlight.Adornee = target
+        end
+    else
+        TargetInfo.Text = "Target: None"
+        SelectionHighlight.Adornee = nil
+    end
+end)
+
+-- Function to create and manage the tool across respawns
+local function giveTool()
+    local backpack = LocalPlayer:WaitForChild("Backpack")
+
+    -- Check if player already has the tool in backpack or character
+    if backpack:FindFirstChild("Advanced Destroyer") or (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Advanced Destroyer")) then
+        return
+    end
+
+    local Tool = Instance.new("Tool")
+    Tool.Name = "Advanced Destroyer"
+    Tool.RequiresHandle = false
+
+    Tool.Equipped:Connect(function()
+        ScreenGui.Enabled = true
+    end)
+
+    Tool.Unequipped:Connect(function()
+        ScreenGui.Enabled = false
+        InspectorFrame.Visible = false
+        SelectionHighlight.Adornee = nil
+    end)
+
+    Tool.Activated:Connect(function()
+        local target = Mouse.Target
+        if not target then return end
+
+        if ToolState.Mode == "Single" then
+            deleteSafely(target)
+
+        elseif ToolState.Mode == "Model" then
+            local model = target:FindFirstAncestorOfClass("Model") or target
+            if model and model ~= Workspace then
+                deleteSafely(model)
+            else
+                deleteSafely(target)
+            end
+
+        elseif ToolState.Mode == "Radius" then
+            local hitPos = Mouse.Hit.Position
+            for _, obj in ipairs(Workspace:GetDescendants()) do
+                if obj:IsA("BasePart") and (obj.Position - hitPos).Magnitude <= ToolState.Radius then
+                    deleteSafely(obj)
+                end
+            end
+
+        elseif ToolState.Mode == "ClassFilter" then
+            if ToolState.FilterType == "Decals & Textures" then
+                for _, child in ipairs(target:GetChildren()) do
+                    if child:IsA("Decal") or child:IsA("Texture") then
+                        deleteSafely(child)
+                    end
+                end
+            elseif ToolState.FilterType == "Lights & Sounds" then
+                for _, child in ipairs(target:GetChildren()) do
+                    if child:IsA("Light") or child:IsA("Sound") then
+                        deleteSafely(child)
+                    end
+                end
+            elseif ToolState.FilterType == "MeshParts & SpecialMeshes" then
+                if target:IsA("MeshPart") then
+                    deleteSafely(target)
+                else
+                    for _, child in ipairs(target:GetChildren()) do
+                        if child:IsA("SpecialMesh") then
+                            deleteSafely(child)
+                        end
+                    end
+                end
+            end
+
+        elseif ToolState.Mode == "Inspector" then
+            displayInspectorData(target)
+        end
+    end)
+
+    Tool.Parent = backpack
+end
+
+-- Give tool on execution
+giveTool()
+
+-- Restore tool automatically whenever player respawns
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(0.5)
+    giveTool()
+end)
+
+-- Keyboard Shortcuts
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed or not ScreenGui.Enabled then return end
+
+    if input.KeyCode == Enum.KeyCode.Z then
+        performUndo()
+    elseif input.KeyCode == Enum.KeyCode.E then
+        cycleMode()
+    end
+end)
